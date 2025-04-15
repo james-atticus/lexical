@@ -8,7 +8,7 @@
 
 import type {Binding} from './Bindings';
 import type {LexicalCommand} from 'lexical';
-import type {Doc, RelativePosition, UndoManager, XmlText} from 'yjs';
+import type {Doc, RelativePosition, UndoManager, XmlElement, XmlText} from 'yjs';
 
 import {createCommand} from 'lexical';
 import {UndoManager as YjsUndoManager} from 'yjs';
@@ -63,7 +63,7 @@ export {createBinding} from './Bindings';
 
 export function createUndoManager(
   binding: Binding,
-  root: XmlText,
+  root: XmlElement | XmlText,
 ): UndoManager {
   return new YjsUndoManager(root, {
     trackedOrigins: new Set([binding, null]),

@@ -6,6 +6,9 @@
  *
  */
 
+import type {mutex as Mutex} from 'lib0/mutex';
+
+import {$createTextNode, ElementNode, LexicalEditor, LexicalNode, NodeKey, TextNode} from 'lexical';
 import * as buf from 'lib0/buffer';
 import {simpleDiff} from 'lib0/diff';
 import * as dom from 'lib0/dom';
@@ -13,78 +16,60 @@ import * as environment from 'lib0/environment';
 import * as error from 'lib0/error';
 import * as eventloop from 'lib0/eventloop';
 import * as sha256 from 'lib0/hash/sha256';
-import * as map from 'lib0/map';
 import * as math from 'lib0/math';
 import {createMutex} from 'lib0/mutex';
-import * as object from 'lib0/object';
 import * as random from 'lib0/random';
 import * as set from 'lib0/set';
 import * as PModel from 'prosemirror-model';
-import {Fragment, Node, Schema} from 'prosemirror-model'; // eslint-disable-line
-import {AllSelection, Plugin, TextSelection} from 'prosemirror-state'; // eslint-disable-line
+import {
+  AllSelection,
+  EditorState,
+  Plugin,
+  TextSelection,
+  Transaction,
+} from 'prosemirror-state'; // eslint-disable-line
 import {EditorView} from 'prosemirror-view'; // eslint-disable-line
 import * as Y from 'yjs';
 
+import {Binding, ExcludedProperties} from './Bindings';
+import {$syncPropertiesFromYjs,isExcludedProperty} from './Utils';
+
 // sync-plugin.js
 
-/**
- * @typedef {Object} BindingMetadata
- * @property {ProsemirrorMapping} BindingMetadata.mapping
- * @property {Map<import('prosemirror-model').MarkType, boolean>} BindingMetadata.isOMark - is overlapping mark
- */
-
-/**
- * @return BindingMetadata
- */
-export const createEmptyMeta = () => ({
-  isOMark: new Map(),
-  mapping: new Map(),
-});
-
-/**
- * @param {Y.Item} item
- * @param {Y.Snapshot} [snapshot]
- */
-export const isVisible = (item, snapshot) =>
+export const isVisible = (item: Y.Item, snapshot?: Y.Snapshot): boolean =>
   snapshot === undefined
     ? !item.deleted
     : snapshot.sv.has(item.id.client) &&
       /** @type {number} */
-      snapshot.sv.get(item.id.client) > item.id.clock &&
+      snapshot.sv.get(item.id.client)! > item.id.clock &&
       !Y.isDeleted(snapshot.ds, item.id);
 
 /**
  * Either a node if type is YXmlElement or an Array of text nodes if YXmlText
- * @typedef {Map<Y.AbstractType<any>, PModel.Node | Array<PModel.Node>>} ProsemirrorMapping
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type LexicalMapping = Map<Y.AbstractType<any>, LexicalNode | Array<TextNode>>;
 
-/**
- * @typedef {Object} ColorDef
- * @property {string} ColorDef.light
- * @property {string} ColorDef.dark
- */
+interface ColorDef {
+  light: string;
+  dark: string;
+}
 
-/**
- * @typedef {Object} YSyncOpts
- * @property {Array<ColorDef>} [YSyncOpts.colors]
- * @property {Map<string,ColorDef>} [YSyncOpts.colorMapping]
- * @property {Y.PermanentUserData|null} [YSyncOpts.permanentUserData]
- * @property {ProsemirrorMapping} [YSyncOpts.mapping]
- * @property {function} [YSyncOpts.onFirstRender] Fired when the content from Yjs is initially rendered to ProseMirror
- */
+interface YSyncOpts {
+  colors?: Array<ColorDef>;
+  colorMapping?: Map<string, ColorDef>;
+  permanentUserData?: Y.PermanentUserData | null;
+  mapping?: LexicalMapping;
+  onFirstRender?: VoidFunction;
+}
 
-/**
- * @type {Array<ColorDef>}
- */
-const defaultColors = [{dark: '#ecd444', light: '#ecd44433'}];
+const defaultColors: ColorDef[] = [{dark: '#ecd444', light: '#ecd44433'}];
 
-/**
- * @param {Map<string,ColorDef>} colorMapping
- * @param {Array<ColorDef>} colors
- * @param {string} user
- * @return {ColorDef}
- */
-const getUserColor = (colorMapping, colors, user) => {
+const getUserColor = (
+  colorMapping: Map<string, ColorDef>,
+  colors: ColorDef[],
+  user: string,
+): ColorDef => {
   // @todo do not hit the same color twice if possible
   if (!colorMapping.has(user)) {
     if (colorMapping.size < colors.length) {
@@ -94,29 +79,26 @@ const getUserColor = (colorMapping, colors, user) => {
     }
     colorMapping.set(user, random.oneOf(colors));
   }
-  return /** @type {ColorDef} */ colorMapping.get(user);
+  return colorMapping.get(user)!;
 };
 
 /**
  * This plugin listens to changes in prosemirror view and keeps yXmlState and view in sync.
  *
  * This plugin also keeps references to the type and the shared document so other plugins can access it.
- * @param {Y.XmlFragment} yXmlFragment
- * @param {YSyncOpts} opts
- * @return {any} Returns a prosemirror plugin that binds to this type
  */
 export const ySyncPlugin = (
-  yXmlFragment,
+  yXmlFragment: Y.XmlFragment,
   {
     colors = defaultColors,
     colorMapping = new Map(),
     permanentUserData = null,
     onFirstRender = () => {},
     mapping,
-  } = {},
+  }: YSyncOpts = {},
 ) => {
   let initialContentChanged = false;
-  const binding = new ProsemirrorBinding(yXmlFragment, mapping);
+  const binding = new LexicalBinding(yXmlFragment, mapping);
   const plugin = new Plugin({
     key: ySyncPluginKey,
     props: {
@@ -170,7 +152,7 @@ export const ySyncPlugin = (
                 delete pluginState.prevSnapshot;
                 binding.mux(() => {
                   binding._prosemirrorChanged(
-                    binding.prosemirrorView.state.doc,
+                    binding.prosemirrorView!.state.doc,
                   );
                 });
               }
@@ -221,7 +203,7 @@ export const ySyncPlugin = (
               // represent it in Yjs
               initialContentChanged ||
               view.state.doc.content.findDiffStart(
-                view.state.doc.type.createAndFill().content,
+                view.state.doc.type.createAndFill()!.content,
               ) !== null
             ) {
               initialContentChanged = true;
@@ -253,12 +235,12 @@ export const ySyncPlugin = (
   return plugin;
 };
 
-/**
- * @param {any} tr
- * @param {any} relSel
- * @param {ProsemirrorBinding} binding
- */
-const restoreRelativeSelection = (tr, relSel, binding) => {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const restoreRelativeSelection = (
+  tr: any,
+  relSel: any,
+  binding: LexicalBinding,
+) => {
   if (relSel !== null && relSel.anchor !== null && relSel.head !== null) {
     if (relSel.type === 'all') {
       tr.setSelection(new AllSelection(tr.doc));
@@ -282,11 +264,10 @@ const restoreRelativeSelection = (tr, relSel, binding) => {
   }
 };
 
-/**
- * @param {ProsemirrorBinding} pmbinding
- * @param {import('prosemirror-state').EditorState} state
- */
-export const getRelativeSelection = (pmbinding, state) => ({
+export const getRelativeSelection = (
+  pmbinding: LexicalBinding,
+  state: EditorState,
+) => ({
   anchor: absolutePositionToRelativePosition(
     state.selection.anchor,
     pmbinding.type,
@@ -305,26 +286,41 @@ export const getRelativeSelection = (pmbinding, state) => ({
  *
  * @protected
  */
-export class ProsemirrorBinding {
-  /**
-   * @param {Y.XmlFragment} yXmlFragment The bind source
-   * @param {ProsemirrorMapping} mapping
-   */
-  constructor(yXmlFragment, mapping = new Map()) {
+export class LexicalBinding {
+  type: Y.XmlFragment;
+  prosemirrorView: EditorView | null;
+  editor: LexicalEditor;
+  mux: Mutex;
+  mapping: LexicalMapping;
+  nodeProperties: Map<string, Array<string>>;
+  excludedProperties: ExcludedProperties;
+  _observeFunction: (
+    events: Array<Y.YEvent<any>>,
+    transaction: Y.Transaction,
+  ) => void;
+  doc: Y.Doc;
+  beforeTransactionSelection: Selection | null;
+  beforeAllTransactions: () => void;
+  afterAllTransactions: () => void;
+  _domSelectionInView: boolean | null;
+
+  constructor(
+    yXmlFragment: Y.XmlFragment,
+    editor: LexicalEditor,
+    mapping: LexicalMapping = new Map(),
+    excludedProperties: ExcludedProperties = new Map(),
+  ) {
     this.type = yXmlFragment;
     /**
      * this will be set once the view is created
      * @type {any}
      */
     this.prosemirrorView = null;
+    this.editor = editor;
     this.mux = createMutex();
     this.mapping = mapping;
-    /**
-     * Is overlapping mark - i.e. mark does not exclude itself.
-     *
-     * @type {Map<import('prosemirror-model').MarkType, boolean>}
-     */
-    this.isOMark = new Map();
+    this.nodeProperties = new Map();
+    this.excludedProperties = excludedProperties;
     this._observeFunction = this._typeChanged.bind(this);
     /**
      * @type {Y.Doc}
@@ -354,15 +350,13 @@ export class ProsemirrorBinding {
 
   /**
    * Create a transaction for changing the prosemirror state.
-   *
-   * @returns
    */
-  get _tr() {
-    return this.prosemirrorView.state.tr.setMeta('addToHistory', false);
+  get _tr(): Transaction {
+    return this.prosemirrorView!.state.tr.setMeta('addToHistory', false);
   }
 
   _isLocalCursorInView() {
-    if (!this.prosemirrorView.hasFocus()) {
+    if (!this.prosemirrorView!.hasFocus()) {
       return false;
     }
     if (environment.isBrowser && this._domSelectionInView === null) {
@@ -376,13 +370,13 @@ export class ProsemirrorBinding {
   }
 
   _isDomSelectionInView() {
-    const selection = this.prosemirrorView._root.getSelection();
+    const selection = this.prosemirrorView!._root.getSelection();
 
     if (selection == null || selection.anchorNode == null) {
       return false;
     }
 
-    const range = this.prosemirrorView._root.createRange();
+    const range = this.prosemirrorView!._root.createRange();
     range.setStart(selection.anchorNode, selection.anchorOffset);
     range.setEnd(selection.focusNode, selection.focusOffset);
 
@@ -413,11 +407,11 @@ export class ProsemirrorBinding {
    * @param {Y.Snapshot} snapshot
    * @param {Y.Snapshot} prevSnapshot
    */
-  renderSnapshot(snapshot, prevSnapshot) {
+  renderSnapshot(snapshot: Y.Snapshot, prevSnapshot: Y.Snapshot) {
     if (!prevSnapshot) {
       prevSnapshot = Y.createSnapshot(Y.createDeleteSet(), new Map());
     }
-    this.prosemirrorView.dispatch(
+    this.prosemirrorView!.dispatch(
       this._tr.setMeta(ySyncPluginKey, {prevSnapshot, snapshot}),
     );
   }
@@ -428,9 +422,8 @@ export class ProsemirrorBinding {
       const fragmentContent = this.type
         .toArray()
         .map((t) =>
-          createNodeFromYElement(
-            /** @type {Y.XmlElement} */ t,
-            this.prosemirrorView.state.schema,
+          $createNodeFromYElement(
+            t as Y.XmlElement,
             this,
           ),
         )
@@ -438,11 +431,11 @@ export class ProsemirrorBinding {
       // @ts-ignore
       const tr = this._tr.replace(
         0,
-        this.prosemirrorView.state.doc.content.size,
+        this.prosemirrorView!.state.doc.content.size,
         new PModel.Slice(PModel.Fragment.from(fragmentContent), 0, 0),
       );
       tr.setMeta(ySyncPluginKey, {prevSnapshot: null, snapshot: null});
-      this.prosemirrorView.dispatch(tr);
+      this.prosemirrorView!.dispatch(tr);
     });
   }
 
@@ -455,13 +448,12 @@ export class ProsemirrorBinding {
       const sel =
         this.beforeTransactionSelection !== null
           ? null
-          : this.prosemirrorView.state.selection;
+          : this.prosemirrorView!.state.selection;
       const fragmentContent = this.type
         .toArray()
         .map((t) =>
-          createNodeFromYElement(
-            /** @type {Y.XmlElement} */ t,
-            this.prosemirrorView.state.schema,
+          $createNodeFromYElement(
+            t as Y.XmlElement,
             this,
           ),
         )
@@ -469,7 +461,7 @@ export class ProsemirrorBinding {
       // @ts-ignore
       const tr = this._tr.replace(
         0,
-        this.prosemirrorView.state.doc.content.size,
+        this.prosemirrorView!.state.doc.content.size,
         new PModel.Slice(PModel.Fragment.from(fragmentContent), 0, 0),
       );
       if (sel) {
@@ -491,23 +483,21 @@ export class ProsemirrorBinding {
           TextSelection.create(tr.doc, clampedAnchor, clampedHead),
         );
       }
-      this.prosemirrorView.dispatch(
+      this.prosemirrorView!.dispatch(
         tr.setMeta(ySyncPluginKey, {binding: this, isChangeOrigin: true}),
       );
     });
   }
 
-  /**
-   * @param {Y.Snapshot|Uint8Array} snapshot
-   * @param {Y.Snapshot|Uint8Array} prevSnapshot
-   * @param {Object} pluginState
-   */
-  _renderSnapshot(snapshot, prevSnapshot, pluginState) {
+  _renderSnapshot(
+    snapshot: Y.Snapshot | Uint8Array,
+    prevSnapshot: Y.Snapshot | Uint8Array,
+    pluginState: any,
+  ) {
     /**
      * The document that contains the full history of this document.
-     * @type {Y.Doc}
      */
-    let historyDoc = this.doc;
+    let historyDoc: Y.Doc = this.doc;
     if (!snapshot) {
       snapshot = Y.snapshot(this.doc);
     }
@@ -570,10 +560,9 @@ export class ProsemirrorBinding {
               isVisible(t._item, snapshot) ||
               isVisible(t._item, prevSnapshot)
             ) {
-              return createNodeFromYElement(
+              return $createNodeFromYElement(
                 t,
-                this.prosemirrorView.state.schema,
-                {isOMark: new Map(), mapping: new Map()},
+                {mapping: new Map()},
                 snapshot,
                 prevSnapshot,
                 computeYChange,
@@ -588,21 +577,18 @@ export class ProsemirrorBinding {
         // @ts-ignore
         const tr = this._tr.replace(
           0,
-          this.prosemirrorView.state.doc.content.size,
+          this.prosemirrorView!.state.doc.content.size,
           new PModel.Slice(PModel.Fragment.from(fragmentContent), 0, 0),
         );
-        this.prosemirrorView.dispatch(
+        this.prosemirrorView!.dispatch(
           tr.setMeta(ySyncPluginKey, {isChangeOrigin: true}),
         );
       }, ySyncPluginKey);
     });
   }
 
-  /**
-   * @param {Array<Y.YEvent<any>>} events
-   * @param {Y.Transaction} transaction
-   */
-  _typeChanged(events, transaction) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  _typeChanged(events: Array<Y.YEvent<any>>, transaction: Y.Transaction) {
     if (this.prosemirrorView == null) {
       return;
     }
@@ -617,17 +603,16 @@ export class ProsemirrorBinding {
       return;
     }
     this.mux(() => {
-      /**
-       * @param {any} _
-       * @param {Y.AbstractType<any>} type
-       */
-      const delType = (_, type) => this.mapping.delete(type);
+      const delType = (_value: any, type: Y.AbstractType<any>) =>
+        this.mapping.delete(type);
       Y.iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
         if (struct.constructor === Y.Item) {
-          const type =
-            /** @type {Y.ContentType} */ /** @type {Y.Item} */ struct.content
-              .type;
-          type && this.mapping.delete(type);
+          const content: Y.ContentType = (struct as Y.Item)
+            .content as Y.ContentType;
+          const type = content.type;
+          if (type) {
+            this.mapping.delete(type);
+          }
         }
       });
       transaction.changed.forEach(delType);
@@ -635,9 +620,8 @@ export class ProsemirrorBinding {
       const fragmentContent = this.type
         .toArray()
         .map((t) =>
-          createNodeIfNotExists(
-            /** @type {Y.XmlElement | Y.XmlHook} */ t,
-            this.prosemirrorView.state.schema,
+          $createNodeIfNotExists(
+            t as Y.XmlElement | Y.XmlHook,
             this,
           ),
         )
@@ -645,7 +629,7 @@ export class ProsemirrorBinding {
       // @ts-ignore
       let tr = this._tr.replace(
         0,
-        this.prosemirrorView.state.doc.content.size,
+        this.prosemirrorView!.state.doc.content.size,
         new PModel.Slice(PModel.Fragment.from(fragmentContent), 0, 0),
       );
       restoreRelativeSelection(tr, this.beforeTransactionSelection, this);
@@ -659,19 +643,16 @@ export class ProsemirrorBinding {
       ) {
         tr.scrollIntoView();
       }
-      this.prosemirrorView.dispatch(tr);
+      this.prosemirrorView!.dispatch(tr);
     });
   }
 
-  /**
-   * @param {import('prosemirror-model').Node} doc
-   */
-  _prosemirrorChanged(doc) {
+  _prosemirrorChanged(doc: PModel.Node) {
     this.doc.transact(() => {
       updateYFragment(this.doc, this.type, doc, this);
       this.beforeTransactionSelection = getRelativeSelection(
         this,
-        this.prosemirrorView.state,
+        this.prosemirrorView!.state,
       );
     }, ySyncPluginKey);
   }
@@ -703,28 +684,20 @@ export class ProsemirrorBinding {
 
 /**
  * @private
- * @param {Y.XmlElement | Y.XmlHook} el
- * @param {PModel.Schema} schema
- * @param {BindingMetadata} meta
- * @param {Y.Snapshot} [snapshot]
- * @param {Y.Snapshot} [prevSnapshot]
- * @param {function('removed' | 'added', Y.ID):any} [computeYChange]
- * @return {PModel.Node | null}
  */
-const createNodeIfNotExists = (
-  el,
-  schema,
-  meta,
-  snapshot,
-  prevSnapshot,
-  computeYChange,
-) => {
-  const node = /** @type {PModel.Node} */ meta.mapping.get(el);
+export const $createNodeIfNotExists = (
+  el: Y.XmlElement | Y.XmlHook,
+  meta: Binding,
+  snapshot?: Y.Snapshot,
+  prevSnapshot?: Y.Snapshot,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  computeYChange?: (event: 'removed' | 'added', id: Y.ID) => any,
+): LexicalNode | TextNode[] | null => {
+  const node = meta.mapping.get(el);
   if (node === undefined) {
     if (el instanceof Y.XmlElement) {
-      return createNodeFromYElement(
+      return $createNodeFromYElement(
         el,
-        schema,
         meta,
         snapshot,
         prevSnapshot,
@@ -739,59 +712,57 @@ const createNodeIfNotExists = (
 
 /**
  * @private
- * @param {Y.XmlElement} el
- * @param {any} schema
- * @param {BindingMetadata} meta
- * @param {Y.Snapshot} [snapshot]
- * @param {Y.Snapshot} [prevSnapshot]
- * @param {function('removed' | 'added', Y.ID):any} [computeYChange]
- * @return {PModel.Node | null} Returns node if node could be created. Otherwise it deletes the yjs type and returns null
+ * @return Returns node if node could be created. Otherwise it deletes the yjs type and returns null
  */
-export const createNodeFromYElement = (
-  el,
-  schema,
-  meta,
-  snapshot,
-  prevSnapshot,
-  computeYChange,
-) => {
-  const children = [];
+export const $createNodeFromYElement = (
+  el: Y.XmlElement,
+  meta: Binding,
+  snapshot?: Y.Snapshot,
+  prevSnapshot?: Y.Snapshot,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  computeYChange?: (event: 'removed' | 'added', id: Y.ID) => any,
+): LexicalNode | TextNode[] | null => {
+  const children: LexicalNode[] = [];
   /**
    * @param {Y.XmlElement | Y.XmlText} type
    */
-  const createChildren = (type) => {
+  const $createChildren = (type: Y.XmlElement | Y.XmlText | Y.XmlHook) => {
     if (type instanceof Y.XmlElement) {
-      const n = createNodeIfNotExists(
+      const n = $createNodeIfNotExists(
         type,
-        schema,
         meta,
         snapshot,
         prevSnapshot,
         computeYChange,
       );
       if (n !== null) {
-        children.push(n);
+        if (n instanceof Array) {
+          children.push(...n);
+        } else {
+          children.push(n);
+        }
       }
-    } else {
+    } else if (type instanceof Y.XmlText) {
       // If the next ytext exists and was created by us, move the content to the current ytext.
       // This is a fix for #160 -- duplication of characters when two Y.Text exist next to each
       // other.
-      const nextytext =
-        /** @type {Y.ContentType} */ type._item.right?.content?.type;
+      // eslint-disable-next-line lexical/no-optional-chaining
+      const content = type._item!.right?.content as Y.ContentType | undefined;
+      // eslint-disable-next-line lexical/no-optional-chaining
+      const nextytext = content?.type;
       if (
         nextytext instanceof Y.Text &&
-        !nextytext._item.deleted &&
-        nextytext._item.id.client === nextytext.doc.clientID
+        !nextytext._item!.deleted &&
+        nextytext._item!.id.client === nextytext.doc!.clientID
       ) {
         type.applyDelta([{retain: type.length}, ...nextytext.toDelta()]);
-        nextytext.doc.transact((tr) => {
-          nextytext._item.delete(tr);
+        nextytext.doc!.transact((tr) => {
+          nextytext._item!.delete(tr);
         });
       }
       // now create the prosemirror text nodes
-      const ns = createTextNodesFromYText(
+      const ns = $createTextNodesFromYText(
         type,
-        schema,
         meta,
         snapshot,
         prevSnapshot,
@@ -804,37 +775,49 @@ export const createNodeFromYElement = (
           }
         });
       }
+    } else {
+      throw error.methodUnimplemented(); // we are currently not handling hooks
     }
   };
   if (snapshot === undefined || prevSnapshot === undefined) {
-    el.toArray().forEach(createChildren);
+    el.toArray().forEach($createChildren);
   } else {
     Y.typeListToArraySnapshot(
       el,
       new Y.Snapshot(prevSnapshot.ds, snapshot.sv),
-    ).forEach(createChildren);
+    ).forEach($createChildren);
   }
   try {
     const attrs = el.getAttributes(snapshot);
     if (snapshot !== undefined) {
-      if (!isVisible(/** @type {Y.Item} */ el._item, snapshot)) {
+      if (!isVisible(el._item!, snapshot)) {
         attrs.ychange = computeYChange
-          ? computeYChange('removed', /** @type {Y.Item} */ el._item.id)
+          ? computeYChange('removed', el._item!.id)
           : {type: 'removed'};
-      } else if (!isVisible(/** @type {Y.Item} */ el._item, prevSnapshot)) {
+      } else if (!isVisible(el._item!, prevSnapshot)) {
         attrs.ychange = computeYChange
-          ? computeYChange('added', /** @type {Y.Item} */ el._item.id)
+          ? computeYChange('added', el._item!.id)
           : {type: 'added'};
       }
     }
-    const node = schema.node(el.nodeName, attrs, children);
+    const type = attrs.__type;
+    const registeredNodes = meta.editor._nodes;
+    const nodeInfo = registeredNodes.get(type);
+    if (nodeInfo === undefined) {
+      throw new Error(`Node ${type} is not registered`);
+    }
+    const node = new nodeInfo.klass();
+    $syncPropertiesFromYjs(meta, el, node, null);
+    if (node instanceof ElementNode) {
+      node.splice(0, 0, children);
+    }
     meta.mapping.set(el, node);
     return node;
   } catch (e) {
     // an error occured while creating the node. This is probably a result of a concurrent action.
-    /** @type {Y.Doc} */ el.doc.transact((transaction) => {
-      /** @type {Y.Item} */ el._item.delete(transaction);
-    }, ySyncPluginKey);
+    el.doc!.transact((transaction) => {
+      el._item!.delete(transaction);
+    }, meta);
     meta.mapping.delete(el);
     return null;
   }
@@ -842,54 +825,46 @@ export const createNodeFromYElement = (
 
 /**
  * @private
- * @param {Y.XmlText} text
- * @param {import('prosemirror-model').Schema} schema
- * @param {BindingMetadata} _meta
- * @param {Y.Snapshot} [snapshot]
- * @param {Y.Snapshot} [prevSnapshot]
- * @param {function('removed' | 'added', Y.ID):any} [computeYChange]
- * @return {Array<PModel.Node>|null}
+ * @return {Array<TextNode>|null}
  */
-const createTextNodesFromYText = (
-  text,
-  schema,
-  _meta,
-  snapshot,
-  prevSnapshot,
-  computeYChange,
+const $createTextNodesFromYText = (
+  text: Y.XmlText,
+  meta: Binding,
+  snapshot?: Y.Snapshot,
+  prevSnapshot?: Y.Snapshot,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  computeYChange?: (event: 'removed' | 'added', id: Y.ID) => any,
 ) => {
-  const nodes = [];
+  const nodes: TextNode[] = [];
   const deltas = text.toDelta(snapshot, prevSnapshot, computeYChange);
   try {
     for (let i = 0; i < deltas.length; i++) {
       const delta = deltas[i];
-      nodes.push(
-        schema.text(delta.insert, attributesToMarks(delta.attributes, schema)),
-      );
+      const node = $createTextNode(delta.insert);
+      $syncPropertiesFromYjs(meta, delta.attributes.__properties, node, null);
+      nodes.push(node);
     }
   } catch (e) {
     // an error occured while creating the node. This is probably a result of a concurrent action.
-    /** @type {Y.Doc} */ text.doc.transact((transaction) => {
-      /** @type {Y.Item} */ text._item.delete(transaction);
-    }, ySyncPluginKey);
+    text.doc!.transact((transaction) => {
+      text._item!.delete(transaction);
+    });
     return null;
   }
-  // @ts-ignore
   return nodes;
 };
 
 /**
  * @private
- * @param {Array<any>} nodes prosemirror node
- * @param {BindingMetadata} meta
- * @return {Y.XmlText}
  */
-const createTypeFromTextNodes = (nodes, meta) => {
+const createTypeFromTextNodes = (
+  nodes: TextNode[],
+  meta: Binding,
+): Y.XmlText => {
   const type = new Y.XmlText();
   const delta = nodes.map((node) => ({
-    attributes: marksToAttributes(node.marks, meta),
-    // @ts-ignore
-    insert: node.text,
+    attributes: { __properties: propertiesToAttributes(node, meta) },
+    insert: node.getTextContent(),
   }));
   type.applyDelta(delta);
   meta.mapping.set(type, nodes);
@@ -898,17 +873,21 @@ const createTypeFromTextNodes = (nodes, meta) => {
 
 /**
  * @private
- * @param {any} node prosemirror node
- * @param {BindingMetadata} meta
- * @return {Y.XmlElement}
  */
-const createTypeFromElementNode = (node, meta) => {
-  const type = new Y.XmlElement(node.type.name);
-  for (const key in node.attrs) {
-    const val = node.attrs[key];
-    if (val !== null && key !== 'ychange') {
+const createTypeFromElementNode = (
+  node: LexicalNode,
+  meta: Binding,
+): Y.XmlElement => {
+  const type = new Y.XmlElement(node.getType());
+  const attrs = propertiesToAttributes(node, meta);
+  for (const key in attrs) {
+    const val = attrs[key];
+    if (val !== null) {
       type.setAttribute(key, val);
     }
+  }
+  if (!(node instanceof ElementNode)) {
+    return type;
   }
   type.insert(
     0,
@@ -922,25 +901,24 @@ const createTypeFromElementNode = (node, meta) => {
 
 /**
  * @private
- * @param {PModel.Node|Array<PModel.Node>} node prosemirror text node
- * @param {BindingMetadata} meta
- * @return {Y.XmlElement|Y.XmlText}
  */
-const createTypeFromTextOrElementNode = (node, meta) =>
+const createTypeFromTextOrElementNode = (
+  node: LexicalNode | TextNode[],
+  meta: Binding,
+): Y.XmlElement | Y.XmlText =>
   node instanceof Array
     ? createTypeFromTextNodes(node, meta)
     : createTypeFromElementNode(node, meta);
 
-/**
- * @param {any} val
- */
-const isObject = (val) => typeof val === 'object' && val !== null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const isObject = (val: any) => typeof val === 'object' && val !== null;
 
-/**
- * @param {any} pattrs
- * @param {any} yattrs
- */
-const equalAttrs = (pattrs, yattrs) => {
+const equalAttrs = (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pattrs: Record<string, any>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  yattrs: Record<string, any>,
+) => {
   const keys = Object.keys(pattrs).filter((key) => pattrs[key] !== null);
   let eq =
     keys.length ===
@@ -957,22 +935,23 @@ const equalAttrs = (pattrs, yattrs) => {
   return eq;
 };
 
-/**
- * @typedef {Array<Array<PModel.Node>|PModel.Node>} NormalizedPNodeContent
- */
+type NormalizedPNodeContent = Array<Array<TextNode> | LexicalNode>;
 
-/**
- * @param {any} pnode
- * @return {NormalizedPNodeContent}
- */
-const normalizePNodeContent = (pnode) => {
-  const c = pnode.content.content;
-  const res = [];
+const normalizePNodeContent = (pnode: LexicalNode): NormalizedPNodeContent => {
+  if (!(pnode instanceof ElementNode)) {
+    return [pnode];
+  }
+  const c = pnode.getChildren();
+  const res: NormalizedPNodeContent = [];
   for (let i = 0; i < c.length; i++) {
     const n = c[i];
-    if (n.isText) {
-      const textNodes = [];
-      for (let tnode = c[i]; i < c.length && tnode.isText; tnode = c[++i]) {
+    if (n instanceof TextNode) {
+      const textNodes: TextNode[] = [];
+      for (
+        let tnode = c[i];
+        i < c.length && tnode instanceof TextNode;
+        tnode = c[++i]
+      ) {
         textNodes.push(tnode);
       }
       i--;
@@ -984,37 +963,28 @@ const normalizePNodeContent = (pnode) => {
   return res;
 };
 
-/**
- * @param {Y.XmlText} ytext
- * @param {Array<any>} ptexts
- */
-const equalYTextPText = (ytext, ptexts) => {
+const equalYTextLText = (
+  ytext: Y.XmlText,
+  ltexts: TextNode[],
+  meta: Binding,
+) => {
   const delta = ytext.toDelta();
   return (
-    delta.length === ptexts.length &&
+    delta.length === ltexts.length &&
     delta.every(
-      /** @type {(d:any,i:number) => boolean} */ (d, i) =>
-        d.insert === /** @type {any} */ ptexts[i].text &&
-        object.keys(d.attributes || {}).length === ptexts[i].marks.length &&
-        object.every(d.attributes, (attr, yattrname) => {
-          const markname = yattr2markname(yattrname);
-          const pmarks = ptexts[i].marks;
-          return equalAttrs(
-            attr,
-            pmarks.find(
-              /** @param {any} mark */ (mark) => mark.type.name === markname,
-            )?.attrs,
-          );
-        }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (d: any, i: number) =>
+        d.insert === ltexts[i].getTextContent() &&
+        equalAttrs(d.attributes.__properties, propertiesToAttributes(ltexts[i], meta)),
     )
   );
 };
 
-/**
- * @param {Y.XmlElement|Y.XmlText|Y.XmlHook} ytype
- * @param {any|Array<any>} pnode
- */
-const equalYTypePNode = (ytype, pnode) => {
+const equalYTypePNode = (
+  ytype: Y.XmlElement | Y.XmlText | Y.XmlHook,
+  pnode: LexicalNode | TextNode[],
+  meta: Binding,
+): boolean => {
   if (
     ytype instanceof Y.XmlElement &&
     !(pnode instanceof Array) &&
@@ -1023,37 +993,42 @@ const equalYTypePNode = (ytype, pnode) => {
     const normalizedContent = normalizePNodeContent(pnode);
     return (
       ytype._length === normalizedContent.length &&
-      equalAttrs(ytype.getAttributes(), pnode.attrs) &&
+      equalAttrs(ytype.getAttributes(), propertiesToAttributes(pnode, meta)) &&
       ytype
         .toArray()
-        .every((ychild, i) => equalYTypePNode(ychild, normalizedContent[i]))
+        .every((ychild, i) =>
+          equalYTypePNode(ychild, normalizedContent[i], meta),
+        )
     );
   }
   return (
     ytype instanceof Y.XmlText &&
     pnode instanceof Array &&
-    equalYTextPText(ytype, pnode)
+    equalYTextLText(ytype, pnode, meta)
   );
 };
 
-/**
- * @param {PModel.Node | Array<PModel.Node> | undefined} mapped
- * @param {PModel.Node | Array<PModel.Node>} pcontent
- */
-const mappedIdentity = (mapped, pcontent) =>
+const mappedIdentity = (
+  mapped: LexicalNode | TextNode[] | undefined,
+  pcontent: LexicalNode | TextNode[],
+) =>
   mapped === pcontent ||
   (mapped instanceof Array &&
     pcontent instanceof Array &&
     mapped.length === pcontent.length &&
     mapped.every((a, i) => pcontent[i] === a));
 
-/**
- * @param {Y.XmlElement} ytype
- * @param {PModel.Node} pnode
- * @param {BindingMetadata} meta
- * @return {{ foundMappedChild: boolean, equalityFactor: number }}
- */
-const computeChildEqualityFactor = (ytype, pnode, meta) => {
+type EqualityFactor = {
+  foundMappedChild: boolean;
+  equalityFactor: number;
+};
+
+const computeChildEqualityFactor = (
+  ytype: Y.XmlElement,
+  pnode: LexicalNode,
+  meta: Binding,
+  dirtyElements: Set<NodeKey>,
+): EqualityFactor => {
   const yChildren = ytype.toArray();
   const pChildren = normalizePNodeContent(pnode);
   const pChildCnt = pChildren.length;
@@ -1067,7 +1042,7 @@ const computeChildEqualityFactor = (ytype, pnode, meta) => {
     const leftP = pChildren[left];
     if (mappedIdentity(meta.mapping.get(leftY), leftP)) {
       foundMappedChild = true; // definite (good) match!
-    } else if (!equalYTypePNode(leftY, leftP)) {
+    } else if (!equalYTypePNode(leftY, leftP, meta)) {
       break;
     }
   }
@@ -1076,7 +1051,7 @@ const computeChildEqualityFactor = (ytype, pnode, meta) => {
     const rightP = pChildren[pChildCnt - right - 1];
     if (mappedIdentity(meta.mapping.get(rightY), rightP)) {
       foundMappedChild = true;
-    } else if (!equalYTypePNode(rightY, rightP)) {
+    } else if (!equalYTypePNode(rightY, rightP, meta)) {
       break;
     }
   }
@@ -1089,13 +1064,15 @@ const computeChildEqualityFactor = (ytype, pnode, meta) => {
 /**
  * @param {Y.Text} ytext
  */
-const ytextTrans = (ytext) => {
+const ytextTrans = (
+  ytext: Y.Text,
+): {nAttrs: Record<string, null>; str: string} => {
   let str = '';
   /**
    * @type {Y.Item|null}
    */
   let n = ytext._start;
-  const nAttrs = {};
+  const nAttrs: Record<string, null> = {};
   while (n !== null) {
     if (!n.deleted) {
       if (n.countable && n.content instanceof Y.ContentString) {
@@ -1114,17 +1091,17 @@ const ytextTrans = (ytext) => {
 
 /**
  * @todo test this more
- *
- * @param {Y.Text} ytext
- * @param {Array<any>} ptexts
- * @param {BindingMetadata} meta
  */
-const updateYText = (ytext, ptexts, meta) => {
-  meta.mapping.set(ytext, ptexts);
+const updateYText = (
+  ytext: Y.Text,
+  ltexts: TextNode[],
+  meta: Binding,
+) => {
+  meta.mapping.set(ytext, ltexts);
   const {nAttrs, str} = ytextTrans(ytext);
-  const content = ptexts.map((p) => ({
-    attributes: Object.assign({}, nAttrs, marksToAttributes(p.marks, meta)),
-    insert: /** @type {any} */ p.text,
+  const content = ltexts.map((l) => ({
+    attributes: Object.assign({}, nAttrs, { __properties: propertiesToAttributes(l, meta) }),
+    insert: /** @type {any} */ l.getTextContent(),
   }));
   const {insert, remove, index} = simpleDiff(
     str,
@@ -1137,52 +1114,24 @@ const updateYText = (ytext, ptexts, meta) => {
   );
 };
 
-const hashedMarkNameRegex = /(.*)(--[a-zA-Z0-9+/=]{8})$/;
-/**
- * @param {string} attrName
- */
-export const yattr2markname = (attrName) =>
-  hashedMarkNameRegex.exec(attrName)?.[1] ?? attrName;
-
-/**
- * @todo move this to markstoattributes
- *
- * @param {Object<string, any>} attrs
- * @param {import('prosemirror-model').Schema} schema
- */
-export const attributesToMarks = (attrs, schema) => {
-  /**
-   * @type {Array<import('prosemirror-model').Mark>}
-   */
-  const marks = [];
-  for (const markName in attrs) {
-    // remove hashes if necessary
-    marks.push(schema.mark(yattr2markname(markName), attrs[markName]));
+const propertiesToAttributes = (node: LexicalNode, meta: Binding) => {
+  // syncPropertiesFromLexical
+  const type = node.__type;
+  const nodeProperties = meta.nodeProperties;
+  let properties = nodeProperties.get(type);
+  if (properties === undefined) {
+    properties = Object.keys(node).filter((property) => {
+      return !isExcludedProperty(property, node, meta);
+    });
+    nodeProperties.set(type, properties);
   }
-  return marks;
-};
-
-/**
- * @param {Array<import('prosemirror-model').Mark>} marks
- * @param {BindingMetadata} meta
- */
-const marksToAttributes = (marks, meta) => {
-  const pattrs = {};
-  marks.forEach((mark) => {
-    if (mark.type.name !== 'ychange') {
-      const isOverlapping = map.setIfUndefined(
-        meta.isOMark,
-        mark.type,
-        () => !mark.type.excludes(mark.type),
-      );
-      pattrs[
-        isOverlapping
-          ? `${mark.type.name}--${hashOfJSON(mark.toJSON())}`
-          : mark.type.name
-      ] = mark.attrs;
-    }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const attrs: Record<string, any> = {};
+  properties.forEach((property) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    attrs[property] = (node as any)[property];
   });
-  return pattrs;
+  return attrs;
 };
 
 /**
@@ -1192,16 +1141,18 @@ const marksToAttributes = (marks, meta) => {
  *
  * @private
  * @unstable
- *
- * @param {{transact: Function}} y
- * @param {Y.XmlFragment} yDomFragment
- * @param {any} pNode
- * @param {BindingMetadata} meta
  */
-export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+export const updateYFragment = (
+  y: Y.Doc,
+  yDomFragment: Y.XmlElement,
+  pNode: LexicalNode,
+  meta: Binding,
+  dirtyElements: Set<NodeKey>,
+) => {
   if (
     yDomFragment instanceof Y.XmlElement &&
-    yDomFragment.nodeName !== pNode.type.name
+    yDomFragment.nodeName !== pNode.getType() &&
+    !(yDomFragment.nodeName === 'UNDEFINED' && pNode.getType() === 'root')
   ) {
     throw new Error('node name mismatch!');
   }
@@ -1209,7 +1160,7 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
   // update attributes
   if (yDomFragment instanceof Y.XmlElement) {
     const yDomAttrs = yDomFragment.getAttributes();
-    const pAttrs = pNode.attrs;
+    const pAttrs = propertiesToAttributes(pNode, meta);
     for (const key in pAttrs) {
       if (pAttrs[key] !== null) {
         if (yDomAttrs[key] !== pAttrs[key] && key !== 'ychange') {
@@ -1238,8 +1189,12 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
   for (; left < minCnt; left++) {
     const leftY = yChildren[left];
     const leftP = pChildren[left];
-    if (!mappedIdentity(meta.mapping.get(leftY), leftP)) {
-      if (equalYTypePNode(leftY, leftP)) {
+    if (mappedIdentity(meta.mapping.get(leftY), leftP)) {
+      if (leftP instanceof ElementNode && dirtyElements.has(leftP.getKey())) {
+        updateYFragment(y, leftY as Y.XmlElement, leftP as LexicalNode, meta, dirtyElements);
+      }
+    } else {
+      if (equalYTypePNode(leftY, leftP, meta)) {
         // update mapping
         meta.mapping.set(leftY, leftP);
       } else {
@@ -1251,8 +1206,12 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
   for (; right + left + 1 < minCnt; right++) {
     const rightY = yChildren[yChildCnt - right - 1];
     const rightP = pChildren[pChildCnt - right - 1];
-    if (!mappedIdentity(meta.mapping.get(rightY), rightP)) {
-      if (equalYTypePNode(rightY, rightP)) {
+    if (mappedIdentity(meta.mapping.get(rightY), rightP)) {
+      if (rightP instanceof ElementNode && dirtyElements.has(rightP.getKey())) {
+        updateYFragment(y, rightY as Y.XmlElement, rightP as LexicalNode, meta, dirtyElements);
+      }
+    } else {
+      if (equalYTypePNode(rightY, rightP, meta)) {
         // update mapping
         meta.mapping.set(rightY, rightP);
       } else {
@@ -1268,7 +1227,7 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
       const rightY = yChildren[yChildCnt - right - 1];
       const rightP = pChildren[pChildCnt - right - 1];
       if (leftY instanceof Y.XmlText && leftP instanceof Array) {
-        if (!equalYTextPText(leftY, leftP)) {
+        if (!equalYTextLText(leftY, leftP, meta)) {
           updateYText(leftY, leftP, meta);
         }
         left += 1;
@@ -1280,14 +1239,16 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
         if (updateLeft && updateRight) {
           // decide which which element to update
           const equalityLeft = computeChildEqualityFactor(
-            /** @type {Y.XmlElement} */ leftY,
-            /** @type {PModel.Node} */ leftP,
+            leftY as Y.XmlElement,
+            leftP as LexicalNode,
             meta,
+            dirtyElements,
           );
           const equalityRight = computeChildEqualityFactor(
-            /** @type {Y.XmlElement} */ rightY,
-            /** @type {PModel.Node} */ rightP,
+            rightY as Y.XmlElement,
+            rightP as LexicalNode,
             meta,
+            dirtyElements,
           );
           if (
             equalityLeft.foundMappedChild &&
@@ -1308,19 +1269,15 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
           }
         }
         if (updateLeft) {
-          updateYFragment(
-            y,
-            /** @type {Y.XmlFragment} */ leftY,
-            /** @type {PModel.Node} */ leftP,
-            meta,
-          );
+          updateYFragment(y, leftY as Y.XmlElement, leftP as LexicalNode, meta, dirtyElements);
           left += 1;
         } else if (updateRight) {
           updateYFragment(
             y,
-            /** @type {Y.XmlFragment} */ rightY,
-            /** @type {PModel.Node} */ rightP,
+            rightY as Y.XmlElement,
+            rightP as LexicalNode,
             meta,
+            dirtyElements,
           );
           right += 1;
         } else {
@@ -1356,61 +1313,22 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
       }
       yDomFragment.insert(left, ins);
     }
-  }, ySyncPluginKey);
+  }, meta);
 };
 
-/**
- * @function
- * @param {Y.XmlElement} yElement
- * @param {any} pNode Prosemirror Node
- */
-const matchNodeName = (yElement, pNode) =>
-  !(pNode instanceof Array) && yElement.nodeName === pNode.type.name;
+const matchNodeName = (
+  yElement: Y.XmlElement,
+  pNode: LexicalNode | TextNode[],
+) => !(pNode instanceof Array) && yElement.nodeName === pNode.getType();
 
 // lib.js
-
-/**
- * Either a node if type is YXmlElement or an Array of text nodes if YXmlText
- * @typedef {Map<Y.AbstractType, Node | Array<Node>>} ProsemirrorMapping
- */
-
-/**
- * Is null if no timeout is in progress.
- * Is defined if a timeout is in progress.
- * Maps from view
- * @type {Map<EditorView, Map<any, any>>|null}
- */
-let viewsToUpdate = null;
-
-const updateMetas = () => {
-  const ups = /** @type {Map<EditorView, Map<any, any>>} */ viewsToUpdate;
-  viewsToUpdate = null;
-  ups.forEach((metas, view) => {
-    const tr = view.state.tr;
-    const syncState = ySyncPluginKey.getState(view.state);
-    if (syncState && syncState.binding && !syncState.binding.isDestroyed) {
-      metas.forEach((val, key) => {
-        tr.setMeta(key, val);
-      });
-      view.dispatch(tr);
-    }
-  });
-};
-
-export const setMeta = (view, key, value) => {
-  if (!viewsToUpdate) {
-    viewsToUpdate = new Map();
-    eventloop.timeout(0, updateMetas);
-  }
-  map.setIfUndefined(viewsToUpdate, view, map.create).set(key, value);
-};
 
 /**
  * Transforms a Prosemirror based absolute position to a Yjs Cursor (relative position in the Yjs model).
  *
  * @param {number} pos
  * @param {Y.XmlFragment} type
- * @param {ProsemirrorMapping} mapping
+ * @param {LexicalMapping} mapping
  * @return {any} relative position
  */
 export const absolutePositionToRelativePosition = (pos, type, mapping) => {
@@ -1520,14 +1438,14 @@ const createRelativePosition = (type, item) => {
  * @param {Y.Doc} y
  * @param {Y.XmlFragment} documentType Top level type that is bound to pView
  * @param {any} relPos Encoded Yjs based relative position
- * @param {ProsemirrorMapping} mapping
+ * @param {LexicalMapping} mapping
  * @return {null|number}
  */
 export const relativePositionToAbsolutePosition = (
-  y,
-  documentType,
-  relPos,
-  mapping,
+  y: Y.Doc,
+  documentType: Y.XmlElement,
+  relPos: any,
+  mapping: LexicalMapping,
 ) => {
   const decodedPos = Y.createAbsolutePositionFromRelativePosition(relPos, y);
   if (
@@ -1546,15 +1464,15 @@ export const relativePositionToAbsolutePosition = (
     let i = 0;
     while (i < type._length && i < decodedPos.index && n !== null) {
       if (!n.deleted) {
-        const t = /** @type {Y.ContentType} */ n.content.type;
+        const t = (n.content as Y.ContentType).type;
         i++;
         if (t instanceof Y.XmlText) {
           pos += t._length;
         } else {
-          pos += /** @type {any} */ mapping.get(t).nodeSize;
+          pos += (mapping.get(t) as any).nodeSize;
         }
       }
-      n = /** @type {Y.Item} */ n.right;
+      n = n.right as Y.Item;
     }
     pos += 1; // increase because we go out of n
   }
@@ -1586,277 +1504,12 @@ export const relativePositionToAbsolutePosition = (
   return pos - 1; // we don't count the most outer tag, because it is a fragment
 };
 
-/**
- * Utility function for converting an Y.Fragment to a ProseMirror fragment.
- *
- * @param {Y.XmlFragment} yXmlFragment
- * @param {Schema} schema
- */
-export const yXmlFragmentToProseMirrorFragment = (yXmlFragment, schema) => {
-  const fragmentContent = yXmlFragment
-    .toArray()
-    .map((t) =>
-      createNodeFromYElement(
-        /** @type {Y.XmlElement} */ t,
-        schema,
-        createEmptyMeta(),
-      ),
-    )
-    .filter((n) => n !== null);
-  return Fragment.fromArray(fragmentContent);
-};
-
-/**
- * Utility function for converting an Y.Fragment to a ProseMirror node.
- *
- * @param {Y.XmlFragment} yXmlFragment
- * @param {Schema} schema
- */
-export const yXmlFragmentToProseMirrorRootNode = (yXmlFragment, schema) =>
-  schema.topNodeType.create(
-    null,
-    yXmlFragmentToProseMirrorFragment(yXmlFragment, schema),
-  );
-
-/**
- * The initial ProseMirror content should be supplied by Yjs. This function transforms a Y.Fragment
- * to a ProseMirror Doc node and creates a mapping that is used by the sync plugin.
- *
- * @param {Y.XmlFragment} yXmlFragment
- * @param {Schema} schema
- *
- * @todo deprecate mapping property
- */
-export const initProseMirrorDoc = (yXmlFragment, schema) => {
-  const meta = createEmptyMeta();
-  const fragmentContent = yXmlFragment
-    .toArray()
-    .map((t) =>
-      createNodeFromYElement(/** @type {Y.XmlElement} */ t, schema, meta),
-    )
-    .filter((n) => n !== null);
-  const doc = schema.topNodeType.create(
-    null,
-    Fragment.fromArray(fragmentContent),
-  );
-  return {doc, mapping: meta.mapping, meta};
-};
-
-/**
- * Utility method to convert a Prosemirror Doc Node into a Y.Doc.
- *
- * This can be used when importing existing content to Y.Doc for the first time,
- * note that this should not be used to rehydrate a Y.Doc from a database once
- * collaboration has begun as all history will be lost
- *
- * @param {Node} doc
- * @param {string} xmlFragment
- * @return {Y.Doc}
- */
-export function prosemirrorToYDoc(doc, xmlFragment = 'prosemirror') {
-  const ydoc = new Y.Doc();
-  const type = /** @type {Y.XmlFragment} */ ydoc.get(
-    xmlFragment,
-    Y.XmlFragment,
-  );
-  if (!type.doc) {
-    return ydoc;
-  }
-
-  prosemirrorToYXmlFragment(doc, type);
-  return type.doc;
-}
-
-/**
- * Utility method to update an empty Y.XmlFragment with content from a Prosemirror Doc Node.
- *
- * This can be used when importing existing content to Y.Doc for the first time,
- * note that this should not be used to rehydrate a Y.Doc from a database once
- * collaboration has begun as all history will be lost
- *
- * Note: The Y.XmlFragment does not need to be part of a Y.Doc document at the time that this
- * method is called, but it must be added before any other operations are performed on it.
- *
- * @param {Node} doc prosemirror document.
- * @param {Y.XmlFragment} [xmlFragment] If supplied, an xml fragment to be
- *   populated from the prosemirror state; otherwise a new XmlFragment will be created.
- * @return {Y.XmlFragment}
- */
-export function prosemirrorToYXmlFragment(doc, xmlFragment) {
-  const type = xmlFragment || new Y.XmlFragment();
-  const ydoc = type.doc
-    ? type.doc
-    : {transact: (transaction) => transaction(undefined)};
-  updateYFragment(ydoc, type, doc, {isOMark: new Map(), mapping: new Map()});
-  return type;
-}
-
-/**
- * Utility method to convert Prosemirror compatible JSON into a Y.Doc.
- *
- * This can be used when importing existing content to Y.Doc for the first time,
- * note that this should not be used to rehydrate a Y.Doc from a database once
- * collaboration has begun as all history will be lost
- *
- * @param {Schema} schema
- * @param {any} state
- * @param {string} xmlFragment
- * @return {Y.Doc}
- */
-export function prosemirrorJSONToYDoc(
-  schema,
-  state,
-  xmlFragment = 'prosemirror',
-) {
-  const doc = Node.fromJSON(schema, state);
-  return prosemirrorToYDoc(doc, xmlFragment);
-}
-
-/**
- * Utility method to convert Prosemirror compatible JSON to a Y.XmlFragment
- *
- * This can be used when importing existing content to Y.Doc for the first time,
- * note that this should not be used to rehydrate a Y.Doc from a database once
- * collaboration has begun as all history will be lost
- *
- * @param {Schema} schema
- * @param {any} state
- * @param {Y.XmlFragment} [xmlFragment] If supplied, an xml fragment to be
- *   populated from the prosemirror state; otherwise a new XmlFragment will be created.
- * @return {Y.XmlFragment}
- */
-export function prosemirrorJSONToYXmlFragment(schema, state, xmlFragment) {
-  const doc = Node.fromJSON(schema, state);
-  return prosemirrorToYXmlFragment(doc, xmlFragment);
-}
-
-/**
- * @deprecated Use `yXmlFragmentToProseMirrorRootNode` instead
- *
- * Utility method to convert a Y.Doc to a Prosemirror Doc node.
- *
- * @param {Schema} schema
- * @param {Y.Doc} ydoc
- * @return {Node}
- */
-export function yDocToProsemirror(schema, ydoc) {
-  const state = yDocToProsemirrorJSON(ydoc);
-  return Node.fromJSON(schema, state);
-}
-
-/**
- *
- * @deprecated Use `yXmlFragmentToProseMirrorRootNode` instead
- *
- * Utility method to convert a Y.XmlFragment to a Prosemirror Doc node.
- *
- * @param {Schema} schema
- * @param {Y.XmlFragment} xmlFragment
- * @return {Node}
- */
-export function yXmlFragmentToProsemirror(schema, xmlFragment) {
-  const state = yXmlFragmentToProsemirrorJSON(xmlFragment);
-  return Node.fromJSON(schema, state);
-}
-
-/**
- *
- * @deprecated Use `yXmlFragmentToProseMirrorRootNode` instead
- *
- * Utility method to convert a Y.Doc to Prosemirror compatible JSON.
- *
- * @param {Y.Doc} ydoc
- * @param {string} xmlFragment
- * @return {Record<string, any>}
- */
-export function yDocToProsemirrorJSON(ydoc, xmlFragment = 'prosemirror') {
-  return yXmlFragmentToProsemirrorJSON(ydoc.getXmlFragment(xmlFragment));
-}
-
-/**
- * @deprecated Use `yXmlFragmentToProseMirrorRootNode` instead
- *
- * Utility method to convert a Y.Doc to Prosemirror compatible JSON.
- *
- * @param {Y.XmlFragment} xmlFragment The fragment, which must be part of a Y.Doc.
- * @return {Record<string, any>}
- */
-export function yXmlFragmentToProsemirrorJSON(xmlFragment) {
-  const items = xmlFragment.toArray();
-
-  /**
-   * @param {Y.AbstractType} item
-   */
-  const serialize = (item) => {
-    /**
-     * @type {Object} NodeObject
-     * @property {string} NodeObject.type
-     * @property {Record<string, string>=} NodeObject.attrs
-     * @property {Array<NodeObject>=} NodeObject.content
-     */
-    let response;
-
-    // TODO: Must be a better way to detect text nodes than this
-    if (item instanceof Y.XmlText) {
-      const delta = item.toDelta();
-      response = delta.map(
-        /** @param {any} d */ (d) => {
-          const text = {
-            text: d.insert,
-            type: 'text',
-          };
-          if (d.attributes) {
-            text.marks = Object.keys(d.attributes).map((type_) => {
-              const attrs = d.attributes[type_];
-              const type = yattr2markname(type_);
-              const mark = {
-                type,
-              };
-              if (Object.keys(attrs)) {
-                mark.attrs = attrs;
-              }
-              return mark;
-            });
-          }
-          return text;
-        },
-      );
-    } else if (item instanceof Y.XmlElement) {
-      response = {
-        type: item.nodeName,
-      };
-
-      const attrs = item.getAttributes();
-      if (Object.keys(attrs).length) {
-        response.attrs = attrs;
-      }
-
-      const children = item.toArray();
-      if (children.length) {
-        response.content = children.map(serialize).flat();
-      }
-    } else {
-      // expected either Y.XmlElement or Y.XmlText
-      error.unexpectedCase();
-    }
-
-    return response;
-  };
-
-  return {
-    content: items.map(serialize),
-    type: 'doc',
-  };
-}
-
 // utils.js
 
 /**
  * Custom function to transform sha256 hash to N byte
- *
- * @param {Uint8Array} digest
  */
-const _convolute = (digest) => {
+const _convolute = (digest: Uint8Array) => {
   const N = 6;
   for (let i = N; i < digest.length; i++) {
     digest[i % N] = digest[i % N] ^ digest[i];
@@ -1864,8 +1517,6 @@ const _convolute = (digest) => {
   return digest.slice(0, N);
 };
 
-/**
- * @param {any} json
- */
-export const hashOfJSON = (json) =>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const hashOfJSON = (json: any) =>
   buf.toBase64(_convolute(sha256.digest(buf.encodeAny(json))));

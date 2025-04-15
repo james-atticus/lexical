@@ -6,7 +6,7 @@
  *
  */
 
-import type {EditorState, NodeKey} from 'lexical';
+import type {EditorState, LexicalNode, NodeKey} from 'lexical';
 
 import {
   $addUpdateTag,
@@ -23,9 +23,15 @@ import {
 } from 'lexical';
 import invariant from 'shared/invariant';
 import {
+  AbstractType as YAbstractType,
+  ContentType as YContentType,
+  Item as YItem,
+  iterateDeletedStructs,
   Map as YMap,
   Text as YText,
+  Transaction,
   XmlElement,
+  XmlHook,
   XmlText,
   YEvent,
   YMapEvent,
@@ -37,6 +43,7 @@ import {Binding, Provider} from '.';
 import {CollabDecoratorNode} from './CollabDecoratorNode';
 import {CollabElementNode} from './CollabElementNode';
 import {CollabTextNode} from './CollabTextNode';
+import { $createNodeIfNotExists, updateYFragment } from './Sync';
 import {
   $syncLocalCursorPosition,
   syncCursorPositions,
@@ -80,7 +87,7 @@ function $syncStateEvent(binding: Binding, event: YMapEvent<any>): boolean {
   return true;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars
 function $syncEvent(binding: Binding, event: any): void {
   if (event instanceof YMapEvent && $syncStateEvent(binding, event)) {
     return;
@@ -126,12 +133,41 @@ function $syncEvent(binding: Binding, event: any): void {
   }
 }
 
+function $syncV2XmlElement(binding: Binding, transaction: Transaction): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const delType = (_value: any, type: YAbstractType<any>) => binding.mapping.delete(type);
+    iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
+      if (struct.constructor === YItem) {
+        const content: YContentType = (struct as YItem)
+          .content as YContentType;
+        const type = content.type;
+        if (type) {
+          binding.mapping.delete(type);
+        }
+      }
+    });
+    transaction.changed.forEach(delType);
+    transaction.changedParentTypes.forEach(delType);
+    const fragmentContent = binding.rootV2XmlElement
+      .toArray()
+      .map((t) => $createNodeIfNotExists(
+        t as XmlElement | XmlHook,
+        binding
+      ) as LexicalNode
+      )
+      .filter((n) => n !== null);
+
+    $getRoot().splice(0, $getRoot().getChildrenSize(), fragmentContent);
+}
+
 export function syncYjsChangesToLexical(
   binding: Binding,
   provider: Provider,
   events: Array<YEvent<YText>>,
+  transaction: Transaction,
   isFromUndoManger: boolean,
   syncCursorPositionsFn: SyncCursorPositionsFn = syncCursorPositions,
+  isV2: boolean = false,
 ): void {
   const editor = binding.editor;
   const currentEditorState = editor._editorState;
@@ -145,9 +181,13 @@ export function syncYjsChangesToLexical(
 
   editor.update(
     () => {
-      for (let i = 0; i < events.length; i++) {
-        const event = events[i];
-        $syncEvent(binding, event);
+      if (binding.useV2) {
+        $syncV2XmlElement(binding, transaction);
+      } else {
+        for (let i = 0; i < events.length; i++) {
+          const event = events[i];
+          $syncEvent(binding, event);
+        }
       }
 
       const selection = $getSelection();
@@ -281,21 +321,25 @@ export function syncLexicalUpdateToYjs(
       }
 
       if (dirtyElements.has('root')) {
-        const prevNodeMap = prevEditorState._nodeMap;
-        const nextLexicalRoot = $getRoot();
-        const collabRoot = binding.root;
-        collabRoot.syncPropertiesFromLexical(
-          binding,
-          nextLexicalRoot,
-          prevNodeMap,
-        );
-        collabRoot.syncChildrenFromLexical(
-          binding,
-          nextLexicalRoot,
-          prevNodeMap,
-          dirtyElements,
-          dirtyLeaves,
-        );
+        if (binding.useV2) {
+          updateYFragment(binding.doc, binding.rootV2XmlElement, $getRoot(), binding, new Set(dirtyElements.keys()));
+        } else {
+          const prevNodeMap = prevEditorState._nodeMap;
+          const nextLexicalRoot = $getRoot();
+          const collabRoot = binding.root;
+          collabRoot.syncPropertiesFromLexical(
+            binding,
+            nextLexicalRoot,
+            prevNodeMap,
+          );
+          collabRoot.syncChildrenFromLexical(
+            binding,
+            nextLexicalRoot,
+            prevNodeMap,
+            dirtyElements,
+            dirtyLeaves,
+          );
+        }
       }
 
       const selection = $getSelection();

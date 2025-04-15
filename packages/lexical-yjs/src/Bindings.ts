@@ -11,12 +11,12 @@ import type {CollabElementNode} from './CollabElementNode';
 import type {CollabLineBreakNode} from './CollabLineBreakNode';
 import type {CollabTextNode} from './CollabTextNode';
 import type {Cursor} from './SyncCursors';
-import type {LexicalEditor, NodeKey} from 'lexical';
-import type {Doc} from 'yjs';
+import type {LexicalEditor, NodeKey, TextNode} from 'lexical';
+import type {AbstractType as YAbstractType,Doc} from 'yjs';
 
 import {Klass, LexicalNode} from 'lexical';
 import invariant from 'shared/invariant';
-import {XmlText} from 'yjs';
+import {XmlElement, XmlText} from 'yjs';
 
 import {Provider} from '.';
 import {$createCollabElementNode} from './CollabElementNode';
@@ -31,6 +31,7 @@ export type Binding = {
     | CollabDecoratorNode
     | CollabLineBreakNode
   >;
+  mapping: LexicalMapping; // from y-prosemirror.js
   cursors: Map<ClientID, Cursor>;
   cursorsContainer: null | HTMLElement;
   doc: Doc;
@@ -39,9 +40,18 @@ export type Binding = {
   id: string;
   nodeProperties: Map<string, Array<string>>;
   root: CollabElementNode;
+  rootV2XmlElement: XmlElement;
+  useV2: boolean;
   excludedProperties: ExcludedProperties;
 };
+
 export type ExcludedProperties = Map<Klass<LexicalNode>, Set<string>>;
+
+/**
+ * Either a non-TextNode if type is YXmlElement or an Array of text nodes if YXmlText
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type LexicalMapping = Map<YAbstractType<any>, LexicalNode | Array<TextNode>>;
 
 export function createBinding(
   editor: LexicalEditor,
@@ -49,7 +59,9 @@ export function createBinding(
   id: string,
   doc: Doc | null | undefined,
   docMap: Map<string, Doc>,
-  excludedProperties?: ExcludedProperties,
+  excludedProperties: ExcludedProperties = new Map(),
+  // DO NOT MERGE THIS WITH USE V2 SET TO TRUE
+  useV2: boolean = true,
 ): Binding {
   invariant(
     doc !== undefined && doc !== null,
@@ -62,6 +74,7 @@ export function createBinding(
     'root',
   );
   root._key = 'root';
+  const rootV2XmlElement = doc.get('root.v2', XmlElement) as XmlElement;
   return {
     clientID: doc.clientID,
     collabNodeMap: new Map(),
@@ -70,9 +83,12 @@ export function createBinding(
     doc,
     docMap,
     editor,
-    excludedProperties: excludedProperties || new Map(),
+    excludedProperties,
     id,
+    mapping: new Map(),
     nodeProperties: new Map(),
     root,
+    rootV2XmlElement,
+    useV2,
   };
 }

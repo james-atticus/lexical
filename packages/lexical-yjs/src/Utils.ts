@@ -56,7 +56,7 @@ const elementExcludedProperties = new Set<string>([
 const rootExcludedProperties = new Set<string>(['__cachedText']);
 const textExcludedProperties = new Set<string>(['__text']);
 
-function isExcludedProperty(
+export function isExcludedProperty(
   name: string,
   node: LexicalNode,
   binding: Binding,
@@ -257,7 +257,7 @@ export function createLexicalNodeFromCollabNode(
 
 export function $syncPropertiesFromYjs(
   binding: Binding,
-  sharedType: XmlText | YMap<unknown> | XmlElement,
+  sharedType: XmlText | YMap<unknown> | XmlElement | Record<string, unknown>,
   lexicalNode: LexicalNode,
   keysChanged: null | Set<string>,
 ): void {
@@ -265,7 +265,9 @@ export function $syncPropertiesFromYjs(
     keysChanged === null
       ? sharedType instanceof YMap
         ? Array.from(sharedType.keys())
-        : Object.keys(sharedType.getAttributes())
+        : sharedType instanceof XmlText || sharedType instanceof XmlElement
+          ? Object.keys(sharedType.getAttributes())
+          : Object.keys(sharedType)
       : Array.from(keysChanged);
   let writableNode: LexicalNode | undefined;
 
@@ -311,13 +313,16 @@ export function $syncPropertiesFromYjs(
 }
 
 function sharedTypeGet(
-  sharedType: XmlText | YMap<unknown> | XmlElement,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sharedType: XmlText | YMap<unknown> | XmlElement | Record<string, any>,
   property: string,
 ): unknown {
   if (sharedType instanceof YMap) {
     return sharedType.get(property);
-  } else {
+  } else if (sharedType instanceof XmlText || sharedType instanceof XmlElement) {
     return sharedType.getAttribute(property);
+  } else {
+    return sharedType[property];
   }
 }
 
@@ -335,10 +340,11 @@ function sharedTypeSet(
 
 function $syncNodeStateToLexical(
   binding: Binding,
-  sharedType: XmlText | YMap<unknown> | XmlElement,
+  sharedType: XmlText | YMap<unknown> | XmlElement | Record<string, unknown>,
   lexicalNode: LexicalNode,
 ): void {
   const existingState = sharedTypeGet(sharedType, '__state');
+  // TODO: handle v2 where the sharedType is a Record<string, unknown>
   if (!(existingState instanceof YMap)) {
     return;
   }

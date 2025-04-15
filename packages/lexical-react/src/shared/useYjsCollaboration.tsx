@@ -72,7 +72,7 @@ export function useYjsCollaboration(
   }, [provider]);
 
   useEffect(() => {
-    const {root} = binding;
+    const {root, rootV2XmlElement} = binding;
     const {awareness} = provider;
 
     const onStatus = ({status}: {status: string}) => {
@@ -83,13 +83,15 @@ export function useYjsCollaboration(
       if (
         shouldBootstrap &&
         isSynced &&
-        root.isEmpty() &&
-        root._xmlText._length === 0 &&
         isReloadingDoc.current === false
       ) {
-        initializeEditor(editor, initialEditorState);
+        const initEditor = binding.useV2 
+          ? rootV2XmlElement.length === 0
+          : root.isEmpty() && root._xmlText._length === 0;
+        if (initEditor) {
+          initializeEditor(editor, initialEditorState);
+        }
       }
-
       isReloadingDoc.current = false;
     };
 
@@ -110,6 +112,7 @@ export function useYjsCollaboration(
           binding,
           provider,
           events,
+          transaction,
           isFromUndoManger,
           syncCursorPositionsFn,
         );
@@ -136,7 +139,8 @@ export function useYjsCollaboration(
     provider.on('sync', onSync);
     awareness.on('update', onAwarenessUpdate);
     // This updates the local editor state when we receive updates from other clients
-    root.getSharedType().observeDeep(onYjsTreeChanges);
+    const rootType = binding.useV2 ? rootV2XmlElement : root.getSharedType();
+    rootType.observeDeep(onYjsTreeChanges);
     const removeListener = editor.registerUpdateListener(
       ({
         prevEditorState,

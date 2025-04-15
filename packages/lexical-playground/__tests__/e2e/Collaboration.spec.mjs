@@ -475,14 +475,13 @@ test.describe('Collaboration', () => {
     // Left collaborator undoes their bold text.
     await page.frameLocator('iframe[name="left"]').getByLabel('Undo').click();
 
-    // The undo causes the text to be appended to the original string, like in the above test.
     await assertHTML(
       page,
       html`
         <p
           class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
           dir="ltr">
-          <span data-lexical-text="true">normal boldBOLD</span>
+          <span data-lexical-text="true">normal boBOLDld</span>
         </p>
       `,
     );
@@ -490,7 +489,6 @@ test.describe('Collaboration', () => {
     // Left collaborator redoes the bold text.
     await page.frameLocator('iframe[name="left"]').getByLabel('Redo').click();
 
-    // The text should be back as it was prior to the undo.
     await assertHTML(
       page,
       html`
@@ -608,14 +606,14 @@ test.describe('Collaboration', () => {
     // Left collaborator undoes the link.
     await page.frameLocator('iframe[name="left"]').getByLabel('Undo').click();
 
-    // The undo causes the text to be appended to the original string, like in the above test.
+    // The undo causes the text to be removed.
     await assertHTML(
       page,
       html`
         <p
           class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
           dir="ltr">
-          <span data-lexical-text="true">Check out the website! now</span>
+          <span data-lexical-text="true">Check out the website!</span>
         </p>
       `,
     );
