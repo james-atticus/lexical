@@ -6,7 +6,11 @@
  *
  */
 
-import type {EditorState, NodeKey} from 'lexical';
+import type {EditorState, LexicalNode, NodeKey} from 'lexical';
+import type {
+  AbstractType as YAbstractType,
+  Transaction as YTransaction,
+} from 'yjs';
 
 import {
   $addUpdateTag,
@@ -33,7 +37,7 @@ import {
   YXmlEvent,
 } from 'yjs';
 
-import {Binding, Provider} from '.';
+import {Binding, BindingV2, Provider} from '.';
 import {CollabDecoratorNode} from './CollabDecoratorNode';
 import {CollabElementNode} from './CollabElementNode';
 import {CollabTextNode} from './CollabTextNode';
@@ -43,6 +47,7 @@ import {
   SyncCursorPositionsFn,
   syncLexicalSelectionToYjs,
 } from './SyncCursors';
+import {$createOrUpdateNodeFromYElement, updateYFragment} from './SyncV2';
 import {
   $getOrInitCollabNodeFromSharedType,
   $moveSelectionToPreviousNode,
@@ -301,6 +306,120 @@ export function syncLexicalUpdateToYjs(
       const selection = $getSelection();
       const prevSelection = prevEditorState._selection;
       syncLexicalSelectionToYjs(binding, provider, prevSelection, selection);
+    });
+  });
+}
+
+function $syncV2XmlElement(
+  binding: BindingV2,
+  transaction: YTransaction,
+): void {
+  const dirtyElements = new Set<NodeKey>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const collectDirty = (_value: any, type: YAbstractType<any>) => {
+    if (binding.mapping.has(type)) {
+      const node = binding.mapping.get(type)!;
+      if (!(node instanceof Array)) {
+        dirtyElements.add(node.getKey());
+      }
+    }
+  };
+  transaction.changed.forEach(collectDirty);
+  transaction.changedParentTypes.forEach(collectDirty);
+  const fragmentContent = binding.root
+    .toArray()
+    .map(
+      (t) =>
+        $createOrUpdateNodeFromYElement(
+          t as XmlElement,
+          binding,
+          dirtyElements,
+        ) as LexicalNode,
+    )
+    .filter((n) => n !== null);
+
+  $getRoot().splice(0, $getRoot().getChildrenSize(), fragmentContent);
+}
+
+export function syncYjsChangesToLexicalV2__EXPERIMENTAL(
+  binding: BindingV2,
+  events: Array<YEvent<YText>>,
+  transaction: YTransaction,
+  isFromUndoManger: boolean,
+): void {
+  const editor = binding.editor;
+
+  // This line precompute the delta before editor update. The reason is
+  // delta is computed when it is accessed. Note that this can only be
+  // safely computed during the event call. If it is accessed after event
+  // call it might result in unexpected behavior.
+  // https://github.com/yjs/yjs/blob/00ef472d68545cb260abd35c2de4b3b78719c9e4/src/utils/YEvent.js#L132
+  events.forEach((event) => event.delta);
+
+  editor.update(
+    () => {
+      $syncV2XmlElement(binding, transaction);
+
+      if (!isFromUndoManger) {
+        // If it is an external change, we don't want the current scroll position to get changed
+        // since the user might've intentionally scrolled somewhere else in the document.
+        $addUpdateTag(SKIP_SCROLL_INTO_VIEW_TAG);
+      }
+    },
+    {
+      onUpdate: () => {
+        // If there was a collision on the top level paragraph
+        // we need to re-add a paragraph. To ensure this insertion properly syncs with other clients,
+        // it must be placed outside of the update block above that has tags 'collaboration' or 'historic'.
+        editor.update(() => {
+          if ($getRoot().getChildrenSize() === 0) {
+            $getRoot().append($createParagraphNode());
+          }
+        });
+      },
+      skipTransforms: true,
+      tag: isFromUndoManger ? HISTORIC_TAG : COLLABORATION_TAG,
+    },
+  );
+}
+
+export function syncLexicalUpdateToYjsV2__EXPERIMENTAL(
+  binding: BindingV2,
+  editorState: EditorState,
+  dirtyElements: Map<NodeKey, IntentionallyMarkedAsDirtyElement>,
+  normalizedNodes: Set<NodeKey>,
+  tags: Set<string>,
+): void {
+  syncWithTransaction(binding, () => {
+    editorState.read(() => {
+      // We check if the update has come from a origin where the origin
+      // was the collaboration binding previously. This can help us
+      // prevent unnecessarily re-diffing and possible re-applying
+      // the same change editor state again. For example, if a user
+      // types a character and we get it, we don't want to then insert
+      // the same character again. The exception to this heuristic is
+      // when we need to handle normalization merge conflicts.
+      if (tags.has(COLLABORATION_TAG) || tags.has(HISTORIC_TAG)) {
+        if (normalizedNodes.size > 0) {
+          //$handleNormalizationMergeConflicts(binding, normalizedNodes);
+        }
+
+        return;
+      }
+
+      if (dirtyElements.has('root')) {
+        updateYFragment(
+          binding.doc,
+          binding.root,
+          $getRoot(),
+          binding,
+          new Set(dirtyElements.keys()),
+        );
+      }
+
+      // const selection = $getSelection();
+      // const prevSelection = prevEditorState._selection;
+      // syncLexicalSelectionToYjs(binding, provider, prevSelection, selection);
     });
   });
 }
