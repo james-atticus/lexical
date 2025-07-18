@@ -526,4 +526,75 @@ describe('Collaboration', () => {
     client1.stop();
     client2.stop();
   });
+
+  it('should correctly sync if an update is triggered by a mutation listener', async () => {
+    const connector = createTestConnection();
+    const client1 = connector.createClient('1');
+    const client2 = connector.createClient('2');
+    client1.start(container!);
+    client2.start(container!);
+
+    await expectCorrectInitialContent(client1, client2);
+
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+
+    await waitForReact(() => {
+      client1.update(() => {
+        $getRoot()
+          .clear()
+          .append(
+            $createParagraphNode().append($createTextNode('hello')),
+            $createParagraphNode().append($createTextNode('world')),
+            $createParagraphNode().append($createTextNode('foo')),
+          );
+      });
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+
+    const editor = client1.getEditor();
+
+    editor.registerMutationListener(ParagraphNode, (mutations) => {
+      const destroyed = [...mutations.values()].some(
+        (mutation) => mutation === 'destroyed',
+      );
+      if (destroyed) {
+        editor.update(() => {
+          $getRoot().append(
+            $createParagraphNode().append($createTextNode('bar')),
+          );
+        });
+      }
+    });
+
+    editor.registerMutationListener(ParagraphNode, () => {
+      // Force pending updates from the nested editor.update to be committed.
+      editor.read(() => $getRoot());
+    });
+
+    await waitForReact(() => {
+      client1.update(() => {
+        $getRoot().splice(1, 1, []);
+      });
+    });
+
+    expect(client1.getHTML()).toEqual(
+      '<p dir="ltr"><span data-lexical-text="true">hello</span></p>' +
+        '<p dir="ltr"><span data-lexical-text="true">foo</span></p>' +
+        '<p dir="ltr"><span data-lexical-text="true">bar</span></p>',
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+
+    await waitForReact(() => {
+      client1.getEditor().dispatchCommand(UNDO_COMMAND, undefined);
+    });
+
+    expect(client1.getHTML()).toEqual(
+      '<p dir="ltr"><span data-lexical-text="true">hello</span></p>' +
+        '<p dir="ltr"><span data-lexical-text="true">world</span></p>' +
+        '<p dir="ltr"><span data-lexical-text="true">foo</span></p>' +
+        '<p dir="ltr"><span data-lexical-text="true">bar</span></p>',
+    );
+  });
 });
