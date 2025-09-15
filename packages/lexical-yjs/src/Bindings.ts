@@ -18,7 +18,6 @@ import {Klass, LexicalNode} from 'lexical';
 import invariant from 'shared/invariant';
 import {XmlText} from 'yjs';
 
-import {Provider} from '.';
 import {$createCollabElementNode} from './CollabElementNode';
 
 export type ClientID = number;
@@ -45,12 +44,11 @@ export type ExcludedProperties = Map<Klass<LexicalNode>, Set<string>>;
 
 export function createBinding(
   editor: LexicalEditor,
-  provider: Provider,
   id: string,
-  doc: Doc | null | undefined,
   docMap: Map<string, Doc>,
   excludedProperties?: ExcludedProperties,
 ): Binding {
+  const doc = docMap.get(id);
   invariant(
     doc !== undefined && doc !== null,
     'createBinding: doc is null or undefined',

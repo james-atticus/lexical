@@ -6,13 +6,19 @@
  *
  */
 
-import type {Binding, Provider, SyncCursorPositionsFn} from '@lexical/yjs';
+import type {
+  Binding,
+  ExcludedProperties,
+  Provider,
+  SyncCursorPositionsFn,
+} from '@lexical/yjs';
 import type {LexicalEditor} from 'lexical';
 import type {JSX} from 'react';
 
 import {mergeRegister} from '@lexical/utils';
 import {
   CONNECTED_COMMAND,
+  createBinding,
   createUndoManager,
   initLocalState,
   setLocalStateFocus,
@@ -36,30 +42,36 @@ import {
   UNDO_COMMAND,
 } from 'lexical';
 import * as React from 'react';
-import {useCallback, useEffect, useMemo, useRef} from 'react';
+import {useCallback, useEffect, useMemo} from 'react';
 import {createPortal} from 'react-dom';
 import {Doc, Transaction, UndoManager, YEvent} from 'yjs';
 
 import {InitialEditorStateType} from '../LexicalComposer';
+
+export type ProviderFactory = (
+  id: string,
+  yjsDocMap: Map<string, Doc>,
+) => Provider;
 
 export type CursorsContainerRef = React.MutableRefObject<HTMLElement | null>;
 
 export function useYjsCollaboration(
   editor: LexicalEditor,
   id: string,
-  provider: Provider,
+  providerFactory: ProviderFactory,
   docMap: Map<string, Doc>,
+  excludedProperties: ExcludedProperties,
   name: string,
   color: string,
   shouldBootstrap: boolean,
-  binding: Binding,
-  setDoc: React.Dispatch<React.SetStateAction<Doc | undefined>>,
-  cursorsContainerRef?: CursorsContainerRef,
   initialEditorState?: InitialEditorStateType,
   awarenessData?: object,
   syncCursorPositionsFn: SyncCursorPositionsFn = syncCursorPositions,
-): JSX.Element {
-  const isReloadingDoc = useRef(false);
+): {binding: Binding; provider: Provider} {
+  const provider = useMemo(
+    () => providerFactory(id, docMap),
+    [id, docMap, providerFactory],
+  );
 
   const connect = useCallback(() => provider.connect(), [provider]);
 
@@ -70,6 +82,11 @@ export function useYjsCollaboration(
       // Do nothing
     }
   }, [provider]);
+
+  const binding = useMemo(
+    () => createBinding(editor, id, docMap, excludedProperties),
+    [editor, id, docMap, excludedProperties],
+  );
 
   useEffect(() => {
     const {root} = binding;
@@ -84,13 +101,10 @@ export function useYjsCollaboration(
         shouldBootstrap &&
         isSynced &&
         root.isEmpty() &&
-        root._xmlText._length === 0 &&
-        isReloadingDoc.current === false
+        root._xmlText._length === 0
       ) {
         initializeEditor(editor, initialEditorState);
       }
-
-      isReloadingDoc.current = false;
     };
 
     const onAwarenessUpdate = () => {
@@ -124,14 +138,6 @@ export function useYjsCollaboration(
       awarenessData || {},
     );
 
-    const onProviderDocReload = (ydoc: Doc) => {
-      clearEditorSkipCollab(editor, binding);
-      setDoc(ydoc);
-      docMap.set(id, ydoc);
-      isReloadingDoc.current = true;
-    };
-
-    provider.on('reload', onProviderDocReload);
     provider.on('status', onStatus);
     provider.on('sync', onSync);
     awareness.on('update', onAwarenessUpdate);
@@ -164,27 +170,23 @@ export function useYjsCollaboration(
     const connectionPromise = connect();
 
     return () => {
-      if (isReloadingDoc.current === false) {
-        if (connectionPromise) {
-          connectionPromise.then(disconnect);
-        } else {
-          // Workaround for race condition in StrictMode. It's possible there
-          // is a different race for the above case where connect returns a
-          // promise, but we don't have an example of that in-repo.
-          // It's possible that there is a similar issue with
-          // TOGGLE_CONNECT_COMMAND below when the provider connect returns a
-          // promise.
-          // https://github.com/facebook/lexical/issues/6640
-          disconnect();
-        }
+      if (connectionPromise) {
+        connectionPromise.then(disconnect);
+      } else {
+        // Workaround for race condition in StrictMode. It's possible there
+        // is a different race for the above case where connect returns a
+        // promise, but we don't have an example of that in-repo.
+        // It's possible that there is a similar issue with
+        // TOGGLE_CONNECT_COMMAND below when the provider connect returns a
+        // promise.
+        // https://github.com/facebook/lexical/issues/6640
+        disconnect();
       }
 
       provider.off('sync', onSync);
       provider.off('status', onStatus);
-      provider.off('reload', onProviderDocReload);
       awareness.off('update', onAwarenessUpdate);
       root.getSharedType().unobserveDeep(onYjsTreeChanges);
-      docMap.delete(id);
       removeListener();
     };
   }, [
@@ -200,19 +202,8 @@ export function useYjsCollaboration(
     provider,
     shouldBootstrap,
     awarenessData,
-    setDoc,
     syncCursorPositionsFn,
   ]);
-  const cursorsContainer = useMemo(() => {
-    const ref = (element: null | HTMLElement) => {
-      binding.cursorsContainer = element;
-    };
-
-    return createPortal(
-      <div ref={ref} />,
-      (cursorsContainerRef && cursorsContainerRef.current) || document.body,
-    );
-  }, [binding, cursorsContainerRef]);
 
   useEffect(() => {
     return editor.registerCommand(
@@ -236,7 +227,7 @@ export function useYjsCollaboration(
     );
   }, [connect, disconnect, editor]);
 
-  return cursorsContainer;
+  return {binding, provider};
 }
 
 export function useYjsFocusTracking(
@@ -334,6 +325,22 @@ export function useYjsHistory(
   return clearHistory;
 }
 
+export function useYjsCursors(
+  binding: Binding,
+  cursorsContainerRef?: CursorsContainerRef,
+): JSX.Element {
+  return useMemo(() => {
+    const ref = (element: null | HTMLElement) => {
+      binding.cursorsContainer = element;
+    };
+
+    return createPortal(
+      <div ref={ref} />,
+      (cursorsContainerRef && cursorsContainerRef.current) || document.body,
+    );
+  }, [binding, cursorsContainerRef]);
+}
+
 function initializeEditor(
   editor: LexicalEditor,
   initialEditorState?: InitialEditorStateType,
@@ -391,49 +398,4 @@ function initializeEditor(
       tag: HISTORY_MERGE_TAG,
     },
   );
-}
-
-function clearEditorSkipCollab(editor: LexicalEditor, binding: Binding) {
-  // reset editor state
-  editor.update(
-    () => {
-      const root = $getRoot();
-      root.clear();
-      root.select();
-    },
-    {
-      tag: SKIP_COLLAB_TAG,
-    },
-  );
-
-  if (binding.cursors == null) {
-    return;
-  }
-
-  const cursors = binding.cursors;
-
-  if (cursors == null) {
-    return;
-  }
-  const cursorsContainer = binding.cursorsContainer;
-
-  if (cursorsContainer == null) {
-    return;
-  }
-
-  // reset cursors in dom
-  const cursorsArr = Array.from(cursors.values());
-
-  for (let i = 0; i < cursorsArr.length; i++) {
-    const cursor = cursorsArr[i];
-    const selection = cursor.selection;
-
-    if (selection && selection.selections != null) {
-      const selections = selection.selections;
-
-      for (let j = 0; j < selections.length; j++) {
-        cursorsContainer.removeChild(selections[i]);
-      }
-    }
-  }
 }
